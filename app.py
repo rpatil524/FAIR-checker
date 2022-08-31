@@ -1,3 +1,4 @@
+import copy
 from asyncio.log import logger
 from unittest import result
 import eventlet
@@ -15,7 +16,10 @@ from flask import (
     send_file,
     send_from_directory,
     make_response,
+    Blueprint,
 )
+from flask_restx import Resource, Api, fields
+from flask_swagger_ui import get_swaggerui_blueprint
 from flask_cors import CORS
 from flask_socketio import SocketIO
 from flask_socketio import emit
@@ -54,6 +58,19 @@ import git
 
 app = Flask(__name__)
 
+app.config.SWAGGER_UI_OPERATION_ID = True
+app.config.SWAGGER_UI_REQUEST_DURATION = True
+
+
+@app.route("/")
+def index():
+    return render_template(
+        "index.html",
+        title="FAIR-Checker",
+        subtitle="Improve the FAIRness of your web resources",
+    )
+
+
 app.logger.setLevel(logging.DEBUG)
 CORS(app)
 app.config["CORS_HEADERS"] = "Content-Type"
@@ -64,6 +81,28 @@ else:
     app.config.from_object("config.DevelopmentConfig")
 
 print(f'ENV is set to: {app.config["ENV"]}')
+
+
+# blueprint = Blueprint('api', __name__, url_prefix='/api')
+
+api = Api(
+    app,
+    title="FAIR-Checker API",
+    doc="/swagger",
+    base_path="/api",
+    # base_url='/'
+    description=app.config["SERVER_IP"],
+)
+
+# app.register_blueprint(blueprint)
+
+metrics_namespace = api.namespace("metrics", description="Metrics assessment")
+fc_check_namespace = api.namespace(
+    "api/check", description="FAIR Metrics assessment from Check"
+)
+fc_inspect_namespace = api.namespace(
+    "api/inspect", description="FAIR improvement from Inspect"
+)
 
 cache = Cache(app)
 socketio = SocketIO(app)
@@ -108,31 +147,7 @@ metrics = [
 METRICS = {}
 # json_metrics = test_metric.getMetrics()
 factory = FAIRMetricsFactory()
-#
-# # for i in range(1,3):
-# try:
-#     # metrics.append(factory.get_metric("test_f1"))
-#     # metrics.append(factory.get_metric("test_r2"))
-#     for metric in json_metrics:
-#         # remove "FAIR Metrics Gen2" from metric name
-#         name = metric["name"].replace("FAIR Metrics Gen2- ", "")
-#         # same but other syntax because of typo
-#         name = name.replace("FAIR Metrics Gen2 - ", "")
-#         principle = metric["principle"]
-#         METRICS[name] = factory.get_metric(
-#             name,
-#             metric["@id"],
-#             metric["description"],
-#             metric["smarturl"],
-#             principle,
-#             metric["creator"],
-#             metric["created_at"],
-#             metric["updated_at"],
-#         )
 
-# except ValueError as e:
-#     print(f"no metrics implemention for {e}")
-#
 # # A DEPLACER AU LANCEMENT DU SERVEUR ######
 # METRICS_RES = test_metric.getMetrics()
 
@@ -148,6 +163,27 @@ RDF_TYPE = {}
 FILE_UUID = ""
 
 DICT_TEMP_RES = {}
+
+# SWAGGER_URL = '/api/docs'  # URL for exposing Swagger UI (without trailing '/')
+# API_URL = 'http://petstore.swagger.io/v2/swagger.json'  # Our API url (can of course be a local resource)
+# # Call factory function to create our blueprint
+# swaggerui_blueprint = get_swaggerui_blueprint(
+#     SWAGGER_URL,  # Swagger UI static files will be mapped to '{SWAGGER_URL}/dist/'
+#     API_URL,
+#     config={  # Swagger UI config overrides
+#         'app_name': "Test application"
+#     },
+#     # oauth_config={  # OAuth config. See https://github.com/swagger-api/swagger-ui#oauth2-configuration .
+#     #    'clientId': "your-client-id",
+#     #    'clientSecret': "your-client-secret-if-required",
+#     #    'realm': "your-realms",
+#     #    'appName': "your-app-name",
+#     #    'scopeSeparator': " ",
+#     #    'additionalQueryStringParams': {'test': "hello"}
+#     # }
+# )
+#
+# app.register_blueprint(swaggerui_blueprint)
 
 
 @app.context_processor
@@ -172,19 +208,26 @@ def favicon():
     )
 
 
+# @app.route("/")
+# def home():
+#     return render_template(
+#         "index.html",
+#         title="FAIR-Checker",
+#         subtitle="Improve the FAIRness of your web resources",
+#     )
+
+# @api.route('/')
+# class FairChecker(Resource):
+#     def get():
+#         return redirect(url_for('home'), code=302)
+
+
 @app.route("/")
 def home():
     return render_template(
-        "index.html",
-        title="FAIR-Checker",
-        subtitle="Improve the FAIRness of your web resources",
-    )
-
-
-@app.route("/")
-def index():
-    return render_template(
-        "index.html",
+        # "index.html",
+        # title="FAIR-Checker",
+        # subtitle="Improve the FAIRness of your web resources",
     )
 
 
@@ -225,6 +268,216 @@ def statistics():
         r_success=stats.this_week_for_named_metrics(prefix="R", success=1),
         r_failures=stats.this_week_for_named_metrics(prefix="R", success=0),
     )
+
+
+my_fields = api.model(
+    "MyModel",
+    {
+        "name": fields.String(description="The name"),
+        "type": fields.String(description="The object type", enum=["A", "B"]),
+        "age": fields.Integer(min=0),
+        "num": fields.Integer(description="The num to get the square of", min=0),
+        # 'url': fields.String(Description='The URL of the resource to be tested', required=True)
+    },
+)
+
+
+@api.route("/square/<int:num>")
+class TestSquare(Resource):
+    @api.marshal_with(my_fields)
+    def get(self, num):
+        return {"data": num**2}
+
+
+def generate_check_api(metric):
+    @fc_check_namespace.route("/metric_" + metric.get_principle_tag() + "/<path:url>")
+    class MetricEval(Resource):
+        def get(self, url):
+            web_res = WebResource(url)
+            metric.set_web_resource(web_res)
+            result = metric.evaluate()
+            data = {
+                "metric": result.get_metrics(),
+                "score": result.get_score(),
+                "target_uri": result.get_target_uri(),
+                "eval_time": str(result.get_test_time()),
+                "recommendation": result.get_recommendation(),
+                "comment": result.get_log(),
+                "source": "api",
+            }
+            result.persist("API")
+            return data
+
+    MetricEval.__name__ = MetricEval.__name__ + metric.get_principle_tag()
+
+
+for key in METRICS_CUSTOM.keys():
+    generate_check_api(METRICS_CUSTOM[key])
+
+
+@fc_check_namespace.route("/metrics_all/<path:url>")
+class MetricEvalAll(Resource):
+    def get(self, url):
+        web_res = WebResource(url)
+
+        metrics_collection = []
+        metrics_collection.append(FAIRMetricsFactory.get_F1A(web_res))
+        metrics_collection.append(FAIRMetricsFactory.get_F1B(web_res))
+        metrics_collection.append(FAIRMetricsFactory.get_F2A(web_res))
+        metrics_collection.append(FAIRMetricsFactory.get_F2B(web_res))
+        metrics_collection.append(FAIRMetricsFactory.get_I1(web_res))
+        metrics_collection.append(FAIRMetricsFactory.get_I1A(web_res))
+        metrics_collection.append(FAIRMetricsFactory.get_I1B(web_res))
+        metrics_collection.append(FAIRMetricsFactory.get_I2(web_res))
+        metrics_collection.append(FAIRMetricsFactory.get_I2A(web_res))
+        metrics_collection.append(FAIRMetricsFactory.get_I2B(web_res))
+        metrics_collection.append(FAIRMetricsFactory.get_I3(web_res))
+        metrics_collection.append(FAIRMetricsFactory.get_R11(web_res))
+        metrics_collection.append(FAIRMetricsFactory.get_R12(web_res))
+        metrics_collection.append(FAIRMetricsFactory.get_R13(web_res))
+
+        results = []
+        for metric in metrics_collection:
+            result = metric.evaluate()
+            data = {
+                "metric": result.get_metrics(),
+                "score": result.get_score(),
+                "target_uri": result.get_target_uri(),
+                "eval_time": str(result.get_test_time()),
+                "recommendation": result.get_recommendation(),
+                "comment": result.get_log(),
+            }
+            result.persist("API")
+            results.append(data)
+
+        return results
+
+
+@fc_inspect_namespace.route("/get_rdf_metadata/<path:url>")
+class RetrieveMetadata(Resource):
+    @fc_inspect_namespace.produces(["application/ld+json"])
+    def get(self, url):
+        web_res = WebResource(url)
+        data_str = web_res.get_rdf().serialize(format="json-ld")
+        data_json = json.loads(data_str)
+        return data_json
+
+
+describe_list = [
+    util.describe_opencitation,
+    util.describe_wikidata,
+    util.describe_openaire,
+]
+
+
+def generate_ask_api(describe):
+    @fc_inspect_namespace.route("/" + describe.__name__ + "/<path:url>")
+    class Ask(Resource):
+        def get(self, url):
+            web_res = WebResource(url)
+            kg = web_res.get_rdf()
+            old_kg = copy.deepcopy(kg)
+            if util.is_DOI(url):
+                url = util.get_DOI(url)
+            new_kg = describe(url, old_kg)
+            print(len(new_kg))
+            triples_before = len(kg)
+            triples_after = len(new_kg)
+            data = {
+                "triples_before": triples_before,
+                "triples_after": triples_after,
+                "@graph": json.loads(new_kg.serialize(format="json-ld")),
+            }
+            return data
+
+    Ask.__name__ = Ask.__name__ + describe.__name__.capitalize()
+
+
+for describe in describe_list:
+    generate_ask_api(describe)
+
+# @fc_inspect_namespace.route('/inspect_ask_openair/<path:url>')
+# class InspectOpenair(Resource):
+#     def get(self, url):
+#         web_res = WebResource(url)
+#         kg = web_res.get_rdf()
+#
+#         if util.is_DOI(url):
+#             url = util.get_DOI(url)
+#
+#         new_kg = util.describe_openaire(url, kg)
+#         triples_before = len(kg)
+#         triples_after = len (new_kg)
+#         data = {
+#             'triples_before': triples_before,
+#             'triples_after': triples_after,
+#             '@graph': json.loads(new_kg.serialize(format="json-ld")),
+#         }
+#         return data
+
+
+@fc_inspect_namespace.route("/inspect_ontologies/<path:url>")
+class InspectOntologies(Resource):
+    def get(self, url):
+        web_res = WebResource(url)
+        kg = web_res.get_rdf()
+        query_classes = """
+            SELECT DISTINCT ?class { ?s rdf:type ?class } ORDER BY ?class
+        """
+        query_properties = """
+            SELECT DISTINCT ?prop { ?s ?prop ?o } ORDER BY ?prop
+        """
+
+        table_content = {"classes": [], "properties": []}
+        qres = kg.query(query_classes)
+        for row in qres:
+            table_content["classes"].append(
+                {
+                    "name": row["class"],
+                    "tag": {"OLS": None, "LOV": None, "BioPortal": None},
+                }
+            )
+
+        qres = kg.query(query_properties)
+        for row in qres:
+            table_content["properties"].append(
+                {
+                    "name": row["prop"],
+                    "tag": {"OLS": None, "LOV": None, "BioPortal": None},
+                }
+            )
+
+        for c in table_content["classes"]:
+            if util.ask_OLS(c["name"]):
+                c["tag"]["OLS"] = True
+            else:
+                c["tag"]["OLS"] = False
+
+            if util.ask_LOV(c["name"]):
+                c["tag"]["LOV"] = True
+            else:
+                c["tag"]["LOV"] = False
+            if util.ask_BioPortal(c["name"], "class"):
+                c["tag"]["BioPortal"] = True
+            else:
+                c["tag"]["BioPortal"] = False
+
+        for p in table_content["properties"]:
+            if util.ask_OLS(c["name"]):
+                p["tag"]["OLS"] = True
+            else:
+                p["tag"]["OLS"] = False
+
+            if util.ask_LOV(p["name"]):
+                p["tag"]["LOV"] = True
+            else:
+                p["tag"]["LOV"] = False
+            if util.ask_BioPortal(p["name"], "property"):
+                p["tag"]["BioPortal"] = True
+            else:
+                p["tag"]["BioPortal"] = False
+
+        return table_content
 
 
 @socketio.on("webresource")

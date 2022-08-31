@@ -27,7 +27,7 @@ class Evaluation:
     start_time = None
     end_time = None
     score = None
-    recommendation = "No recommendation yet"
+    recommendation = "No recommendation, metric validated"
 
     # Result_tet and reason are used by FAIRMetrics only (result_text: whole nanopub content, reason: comment/log)
     result_text = None
@@ -149,7 +149,7 @@ class Evaluation:
     def get_implem(self):
         return self.implem
 
-    def persist(self):
+    def persist(self, source="UI"):
         client = MongoClient()
         db = client.fair_checker
         db_eval = db.evaluations
@@ -163,6 +163,7 @@ class Evaluation:
             "success": self.score,
             "reason": self.reason,
             "log": self.log_capture_string.getvalue(),
+            "source": source,
         }
 
         r = db_eval.insert_one(eval)
